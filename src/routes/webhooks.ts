@@ -20,6 +20,7 @@ const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         description: 'Receive and process Circle webhook events',
         headers: Type.Object({
           'x-circle-signature': Type.Optional(Type.String()),
+          'x-circle-key-id': Type.Optional(Type.String()),
         }),
         body: Type.Any(),
         response: {
@@ -35,17 +36,25 @@ const webhookRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const signature = request.headers['x-circle-signature'] as string | undefined;
+      const keyId = request.headers['x-circle-key-id'] as string | undefined;
       const payload = request.body;
 
       if (!signature) {
         return reply.code(400).send({
           error: 'Bad Request',
-          message: 'Missing webhook signature',
+          message: 'Missing X-Circle-Signature header',
+        });
+      }
+
+      if (!keyId) {
+        return reply.code(400).send({
+          error: 'Bad Request',
+          message: 'Missing X-Circle-Key-Id header',
         });
       }
 
       try {
-        await webhookService.processWebhook(payload, signature);
+        await webhookService.processWebhook(payload, signature, keyId);
 
         return {
           message: 'Webhook processed',

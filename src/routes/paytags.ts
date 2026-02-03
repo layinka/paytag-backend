@@ -1,10 +1,12 @@
 import { FastifyPluginAsync } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { PaytagService } from '../services/paytag.service.js';
+import { CircleService } from '../services/circle.service.js';
 import { db, payments, paytags } from '../db/index.js';
 import { eq, desc } from 'drizzle-orm';
 
 const paytagService = new PaytagService();
+const circleService = new CircleService();
 
 /**
  * PayTag Routes
@@ -135,6 +137,173 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
+   * PUBLIC: Get PayTag balance
+   */
+  fastify.get(
+    '/v1/paytags/:handle/balance',
+    {
+      schema: {
+        tags: ['paytags'],
+        summary: 'Get PayTag wallet balance',
+        description: 'Get USDC and ETH balance for a PayTag wallet',
+        params: Type.Object({
+          handle: Type.String(),
+        }),
+        response: {
+          200: Type.Object({
+            handle: Type.String(),
+            walletId: Type.String(),
+            walletAddress: Type.String(),
+            balances: Type.Array(
+              Type.Object({
+                token: Type.Optional(
+                  Type.Object({
+                    id: Type.String(),
+                    blockchain: Type.String(),
+                    name: Type.String(),
+                    symbol: Type.String(),
+                    decimals: Type.Number(),
+                  })
+                ),
+                amount: Type.String(),
+              })
+            ),
+          }),
+          404: Type.Object({
+            error: Type.String(),
+            message: Type.String(),
+          }),
+          500: Type.Object({
+            error: Type.String(),
+            message: Type.String(),
+          }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { handle } = request.params as { handle: string };
+
+      try {
+        const paytag = await paytagService.getPaytagByHandle(handle);
+
+        if (!paytag) {
+          return reply.code(404).send({
+            error: 'Not Found',
+            message: 'PayTag not found',
+          });
+        }
+
+        const balanceData = await circleService.getWalletBalance(paytag.circleWalletId);
+
+        if (!balanceData) {
+          return reply.code(500).send({
+            error: 'Internal Server Error',
+            message: 'Failed to retrieve wallet balance',
+          });
+        }
+
+        return {
+          handle: paytag.handle,
+          walletId: paytag.circleWalletId,
+          walletAddress: paytag.circleWalletAddress,
+          balances: balanceData.balances,
+        };
+      } catch (error: any) {
+        fastify.log.error('Balance retrieval error:', error);
+
+        return reply.code(500).send({
+          error: 'Internal Server Error',
+          message: error.message || 'Failed to retrieve balance',
+        });
+      }
+    }
+  );
+
+  /**
+   * PUBLIC: Check handle availability
+   */
+  fastify.get(
+    '/v1/paytags/check/:handle',
+    {
+      schema: {
+        tags: ['paytags'],
+        summary: 'Check handle availability',
+        description: 'Check if a PayTag handle is available',
+        params: Type.Object({
+          handle: Type.String(),
+        }),
+        response: {
+          200: Type.Object({
+            available: Type.Boolean(),
+            handle: Type.String(),
+          }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { handle } = request.params as { handle: string };
+
+      const paytag = await paytagService.getPaytagByHandle(handle);
+
+      return {
+        available: !paytag,
+        handle,
+      };
+    }
+  );
+
+  /**
+   * USER: Get my PayTags
+   */
+  fastify.get(
+    '/v1/paytags/me',
+    {
+      onRequest: [fastify.requireUser],
+      schema: {
+        tags: ['paytags'],
+        summary: 'Get my PayTags',
+        description: 'Get all PayTags for the authenticated user',
+        security: [{ bearerAuth: [] }],
+        response: {
+          200: Type.Object({
+            paytags: Type.Array(
+              Type.Object({
+                id: Type.String(),
+                handle: Type.String(),
+                displayName: Type.String(),
+                walletAddress: Type.String(),
+                walletId: Type.String(),
+                status: Type.String(),
+                createdAt: Type.String(),
+              })
+            ),
+          }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.userId;
+
+      const userPaytags = await db
+        .select()
+        .from(paytags)
+        .where(eq(paytags.userId, userId));
+
+      return {
+        paytags: userPaytags.map((paytag) => ({
+          id: paytag.id,
+          handle: paytag.handle,
+          displayName: paytag.displayName || paytag.handle,
+          walletAddress: paytag.circleWalletAddress,
+          walletId: paytag.circleWalletId,
+          status: paytag.status,
+          createdAt: paytag.createdAt.toISOString(),
+        })),
+      };
+    }
+  );
+
+  /**
    * USER: Create PayTag
    */
   fastify.post(
@@ -149,7 +318,7 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
         body: Type.Object({
           handle: Type.String({ minLength: 3, maxLength: 20 }),
           displayName: Type.Optional(Type.String()),
-          destinationAddress: Type.Optional(Type.String()),
+        //   destinationAddress: Type.Optional(Type.String()),
         }),
         response: {
           201: Type.Object({
@@ -173,10 +342,9 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
       },
     },
     async (request, reply) => {
-      const { handle, displayName, destinationAddress } = request.body as {
+      const { handle, displayName } = request.body as {
         handle: string;
         displayName?: string;
-        destinationAddress?: string;
       };
 
       const userId = request.user!.userId;
@@ -186,7 +354,7 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
           userId,
           handle,
           displayName,
-          destinationAddress
+        //   destinationAddress
         );
 
         return reply.code(201).send({

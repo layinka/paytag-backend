@@ -1,5 +1,6 @@
 import { CircleDeveloperControlledWalletsClient, registerEntitySecretCiphertext } from '@circle-fin/developer-controlled-wallets';
 import { initiateDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
+import crypto from 'crypto';
 
 /**
  * Circle Service
@@ -21,12 +22,22 @@ interface CreateWalletResponse {
   walletAddress: string;
 }
 
+interface PublicKeyResponse {
+  data: {
+    id: string;
+    algorithm: string;
+    publicKey: string;
+    createDate: string;
+  };
+}
+
 export class CircleService {
   private readonly apiKey: string;
   private readonly entitySecret: string;
   private readonly walletSetId: string;
   private readonly environment: string;
   private client: CircleDeveloperControlledWalletsClient | undefined = undefined;
+  private publicKeyCache: Map<string, string> = new Map();
 
   constructor() {
     this.apiKey = process.env.CIRCLE_API_KEY || '';
@@ -62,7 +73,9 @@ export class CircleService {
    * Create a new Circle programmable wallet
    */
   async createWallet(userId: string, count: number = 1) {
-    //
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const _userId = userId; // Reserved for future metadata implementation
+    
     const response = await this.client?.createWallets({
       walletSetId: this.walletSetId,
       blockchains: ['ETH-SEPOLIA', 'BASE-SEPOLIA'],
@@ -122,58 +135,171 @@ export class CircleService {
   }
 
   /**
-   * Verify Circle webhook signature
+   * Get wallet balances by wallet ID
+   * Returns USDC and ETH balances for all supported blockchains
    */
-  verifyWebhookSignature(payload: string, signature: string): boolean {
-    const webhookSecret = process.env.WEBHOOK_SECRET || '';
+  async getWalletBalance(walletId: string): Promise<{
+    walletId: string;
+    balances: Array<{
+      token?: {
+        id: string;
+        blockchain: string;
+        name?: string;
+        symbol?: string;
+        decimals?: number;
+      };
+      amount: string;
+    }>;
+  } | null> {
+    if (!this.client) {
+      throw new Error('Circle API client not initialized');
+    }
 
-    // TODO: Implement Circle webhook signature verification
-    // const expectedSignature = crypto
-    //   .createHmac('sha256', webhookSecret)
-    //   .update(payload)
-    //   .digest('hex');
-    //
-    // return crypto.timingSafeEqual(
-    //   Buffer.from(signature),
-    //   Buffer.from(expectedSignature)
-    // );
+    try {
+      const response = await this.client.getWalletTokenBalance({ id: walletId });
+      
+      console.log('🔵 Wallet Balance Retrieved:', walletId);
+      console.log('   Balances:', response.data?.tokenBalances);
 
-    // For hackathon: basic check
-    console.log('🔵 Verifying webhook signature (MOCK)');
-    return signature.length > 0;
+      return {
+        walletId,
+        balances: response.data?.tokenBalances || [],
+      };
+    } catch (error: any) {
+      console.error('❌ Failed to get wallet balance:', error.message);
+      throw new Error(`Failed to retrieve wallet balance: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetch Circle's public key for webhook signature verification
+   * Public keys are cached as they're static for a given keyId
+   */
+  private async fetchPublicKey(keyId: string): Promise<string> {
+    // Check cache first
+    if (this.publicKeyCache.has(keyId)) {
+      return this.publicKeyCache.get(keyId)!;
+    }
+
+    try {
+      const circleBaseUrl = this.environment === 'production' 
+        ? 'https://api.circle.com'
+        : 'https://api-sandbox.circle.com';
+      
+      const response = await fetch(
+        `${circleBaseUrl}/v2/notifications/publicKey/${keyId}`,
+        {
+          headers: {
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${this.apiKey}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch public key: ${response.statusText}`);
+      }
+
+      const data = await response.json() as PublicKeyResponse;
+      const publicKey = data.data.publicKey;
+
+      // Cache the public key
+      this.publicKeyCache.set(keyId, publicKey);
+      
+      console.log('🔑 Public key retrieved and cached:', keyId);
+      return publicKey;
+    } catch (error: any) {
+      console.error('❌ Failed to fetch public key:', error.message);
+      throw new Error(`Public key fetch failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Verify Circle webhook signature using ECDSA_SHA_256
+   * 
+   * @param payload - Raw webhook payload as string (properly formatted JSON)
+   * @param signature - Base64 encoded signature from X-Circle-Signature header
+   * @param keyId - Public key ID from X-Circle-Key-Id header
+   */
+  async verifyWebhookSignature(
+    payload: string, 
+    signature: string,
+    keyId: string
+  ): Promise<boolean> {
+    try {
+      // Fetch the public key
+      const publicKeyBase64 = await this.fetchPublicKey(keyId);
+      
+      // Load the public key from base64
+      const publicKeyBytes = Buffer.from(publicKeyBase64, 'base64');
+      const publicKey = crypto.createPublicKey({
+        key: publicKeyBytes,
+        format: 'der',
+        type: 'spki',
+      });
+
+      // Load the signature from base64
+      const signatureBytes = Buffer.from(signature, 'base64');
+
+      // Convert payload to bytes
+      const messageBytes = Buffer.from(payload);
+
+      // Verify the signature using ECDSA_SHA_256
+      const isValid = crypto.verify(
+        'sha256',
+        messageBytes,
+        publicKey,
+        signatureBytes
+      );
+
+      if (isValid) {
+        console.log('✅ Webhook signature verified');
+      } else {
+        console.warn('⚠️  Invalid webhook signature');
+      }
+
+      return isValid;
+    } catch (error: any) {
+      console.error('❌ Signature verification error:', error.message);
+      return false;
+    }
   }
 
   /**
    * Parse Circle webhook payload
-   */
-  /**
-   * Parse Circle webhook payload
+   * 
+   * Handles Circle's webhook format:
+   * - notificationType: "transactions.inbound" | "transactions.outbound" | etc.
+   * - notification: actual transaction data
    */
   parseWebhookEvent(payload: any): {
     type: string;
     walletId?: string;
-    transferId?: string;
+    transactionId?: string;
     amount?: string;
-    asset?: string;
-    fromAddress?: string;
-    toAddress?: string;
-    txHash?: string;
+    tokenId?: string;
+    destinationAddress?: string;
     blockchain?: string;
+    state?: string;
+    transactionType?: string;
+    createDate?: string;
+    updateDate?: string;
   } {
-    // Example Circle webhook structure
-    // Adapt based on actual Circle webhook format
-    const event = payload;
+    const notificationType = payload.notificationType || 'unknown';
+    const notification = payload.notification || {};
 
     return {
-      type: event.type || 'unknown',
-      walletId: event.wallet?.id,
-      transferId: event.transfer?.id,
-      amount: event.transfer?.amount,
-      asset: event.transfer?.tokenId || 'USDC',
-      fromAddress: event.transfer?.source?.address,
-      toAddress: event.transfer?.destination?.address,
-      txHash: event.transfer?.transactionHash,
-      blockchain: event.transfer?.blockchain || 'ETH-SEPOLIA',
+      type: notificationType,
+      walletId: notification.walletId,
+      transactionId: notification.id,
+      amount: notification.amounts?.[0] || '0',
+      tokenId: notification.tokenId,
+      destinationAddress: notification.destinationAddress,
+      blockchain: notification.blockchain,
+      state: notification.state,
+      transactionType: notification.transactionType,
+      createDate: notification.createDate,
+      updateDate: notification.updateDate,
     };
   }
 
