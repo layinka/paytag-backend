@@ -78,7 +78,7 @@ export class CircleService {
     
     const response = await this.client?.createWallets({
       walletSetId: this.walletSetId,
-      blockchains: ['ETH-SEPOLIA', 'BASE-SEPOLIA'],
+      blockchains: ['ETH','ETH-SEPOLIA', 'BASE', 'BASE-SEPOLIA'],
       count,
     //   metadata: [
     //     { name:'', refId:   userId}
@@ -86,8 +86,8 @@ export class CircleService {
     });
 
     console.log('🔵 Circle Wallet Created:');
-    console.log('   RESPONSE:', response);
-    console.log('   Data:', response?.data);
+    // console.log('   RESPONSE:', response);
+    // console.log('   Data:', response?.data);
 
     return response?.data;
   }
@@ -159,7 +159,8 @@ export class CircleService {
       const response = await this.client.getWalletTokenBalance({ id: walletId });
       
       console.log('🔵 Wallet Balance Retrieved:', walletId);
-      console.log('   Balances:', response.data?.tokenBalances);
+      console.log('   Balances:', response.data);
+      console.log('   Balances Token:', response.data?.tokenBalances);
 
       return {
         walletId,
@@ -184,7 +185,7 @@ export class CircleService {
     try {
       const circleBaseUrl = this.environment === 'production' 
         ? 'https://api.circle.com'
-        : 'https://api-sandbox.circle.com';
+        : 'https://api.circle.com'; // -sandbox
       
       const response = await fetch(
         `${circleBaseUrl}/v2/notifications/publicKey/${keyId}`,
@@ -217,7 +218,7 @@ export class CircleService {
   /**
    * Verify Circle webhook signature using ECDSA_SHA_256
    * 
-   * @param payload - Raw webhook payload as string (properly formatted JSON)
+   * @param payload - Raw webhook payload as string (exact bytes received)
    * @param signature - Base64 encoded signature from X-Circle-Signature header
    * @param keyId - Public key ID from X-Circle-Key-Id header
    */
@@ -229,38 +230,46 @@ export class CircleService {
     try {
       // Fetch the public key
       const publicKeyBase64 = await this.fetchPublicKey(keyId);
+
+      console.log('🔐 Verifying webhook signature for key:', keyId);
       
-      // Load the public key from base64
+      // Decode the public key from base64 (DER format)
       const publicKeyBytes = Buffer.from(publicKeyBase64, 'base64');
+      
+      // Import the public key
       const publicKey = crypto.createPublicKey({
         key: publicKeyBytes,
         format: 'der',
         type: 'spki',
       });
 
-      // Load the signature from base64
+      // Decode the signature from base64
       const signatureBytes = Buffer.from(signature, 'base64');
+      
+      // Convert payload string to UTF-8 bytes (exactly as received)
+      const messageBytes = Buffer.from(payload, 'utf-8');
 
-      // Convert payload to bytes
-      const messageBytes = Buffer.from(payload);
-
-      // Verify the signature using ECDSA_SHA_256
+      // Verify the signature using ECDSA with SHA-256
       const isValid = crypto.verify(
         'sha256',
         messageBytes,
-        publicKey,
+        {
+          key: publicKey,
+          dsaEncoding: 'der', // ECDSA signatures from Circle are DER-encoded
+        },
         signatureBytes
       );
 
       if (isValid) {
         console.log('✅ Webhook signature verified');
       } else {
-        console.warn('⚠️  Invalid webhook signature');
+        console.error('⚠️  Invalid webhook signature - possible security issue or payload tampering');
       }
 
       return isValid;
     } catch (error: any) {
       console.error('❌ Signature verification error:', error.message);
+      // Don't expose internal error details to potential attackers
       return false;
     }
   }

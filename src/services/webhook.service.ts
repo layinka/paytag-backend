@@ -21,13 +21,16 @@ export class WebhookService {
    * Process Circle webhook event
    */
   async processWebhook(
-    payload: any, 
+    payload: any,
+    rawBody: string,
     signature: string,
     keyId: string
   ): Promise<void> {
+    
     // Verify webhook signature using Circle's asymmetric key verification
+    // Use the raw body string, not the re-serialized JSON
     const isValid = await this.circleService.verifyWebhookSignature(
-      JSON.stringify(payload),
+      rawBody,
       signature,
       keyId
     );
@@ -36,16 +39,33 @@ export class WebhookService {
       throw new Error('Invalid webhook signature');
     }
 
-    // Parse webhook event
-    const event = this.circleService.parseWebhookEvent(payload);
+    // Parse payload if it's a string (shouldn't happen but let's be safe)
+    let parsedPayload = payload;
+    if (typeof payload === 'string') {
+      try {
+        parsedPayload = JSON.parse(payload);
+      } catch (parseError: any) {
+        console.error('❌ Failed to parse webhook payload:', parseError.message);
+        throw new Error('Invalid webhook payload format');
+      }
+    }
 
-    console.log('🔔 Webhook Event Received:', event.type);
-    console.log('   Transaction State:', event.state);
-    console.log('   Transaction Type:', event.transactionType);
+    // Parse webhook event
+    const event = this.circleService.parseWebhookEvent(parsedPayload);
+
+    console.log('🔔 Webhook Event:', {
+      type: event.type,
+      state: event.state,
+      blockchain: event.blockchain,
+      transactionId: event.transactionId
+    });
 
     // Handle inbound transactions (deposits)
-    if (event.type === 'transactions.inbound' && event.state === 'COMPLETED') {
-      await this.handleInboundTransaction(event, payload);
+    // Circle uses CONFIRMED state for successful transactions
+    if (event.type === 'transactions.inbound' && event.state === 'CONFIRMED') {
+      await this.handleInboundTransaction(event, parsedPayload);
+    } else if (event.type === 'transactions.inbound') {
+      console.log(`ℹ️  Inbound transaction in ${event.state} state - not processing yet`);
     }
   }
 
@@ -58,12 +78,17 @@ export class WebhookService {
       transactionId, 
       amount, 
       tokenId, 
-      blockchain, 
-      walletId 
+      blockchain
     } = event;
 
+    // Validate required fields
     if (!destinationAddress || !transactionId) {
-      console.warn('⚠️  Incomplete transaction event, skipping');
+      console.warn('⚠️  Incomplete transaction event - missing required fields', { destinationAddress, transactionId });
+      return;
+    }
+
+    if (!amount || amount === '0') {
+      console.warn('⚠️  Transaction has no amount, skipping', { transactionId });
       return;
     }
 
@@ -75,10 +100,16 @@ export class WebhookService {
     }
 
     // Find PayTag by wallet address
-    const paytag = await this.paytagService.getPaytagByWalletAddress(destinationAddress);
+    let paytag;
+    try {
+      paytag = await this.paytagService.getPaytagByWalletAddress(destinationAddress);
+    } catch (error: any) {
+      console.error('❌ Error looking up PayTag:', error.message);
+      throw new Error('Failed to lookup PayTag for transaction');
+    }
 
     if (!paytag) {
-      console.warn('⚠️  No PayTag found for wallet:', destinationAddress);
+      console.warn('⚠️  No PayTag found for wallet address:', destinationAddress);
       return;
     }
 
@@ -95,29 +126,42 @@ export class WebhookService {
     }
 
     // Create payment record
-    const [payment] = await db
-      .insert(payments)
-      .values({
-        paytagId: paytag.id,
-        chain: blockchain || 'ETH-SEPOLIA',
-        asset: this.normalizeTokenId(tokenId),
-        amount: amount || '0',
-        fromAddress: null, // Circle doesn't provide source address in this format
-        toAddress: destinationAddress,
-        txHash: transactionId, // Use transaction ID as hash
-        circleTransferId: transactionId,
-        rawEvent: rawPayload,
-        status: 'completed',
-      })
-      .returning();
+    let payment;
+    try {
+      [payment] = await db
+        .insert(payments)
+        .values({
+          paytagId: paytag.id,
+          chain: blockchain || 'ETH-SEPOLIA',
+          asset: this.normalizeTokenId(tokenId),
+          amount: amount || '0',
+          fromAddress: null, // Circle doesn't provide source address in this format
+          toAddress: destinationAddress,
+          txHash: transactionId, // Use transaction ID as hash
+          circleTransferId: transactionId,
+          rawEvent: rawPayload,
+          status: 'processed',
+        })
+        .returning();
 
-    console.log('✅ Payment recorded:', payment.id);
-    console.log('   Amount:', amount);
-    console.log('   Blockchain:', blockchain);
-    console.log('   Wallet ID:', walletId);
+      console.log('✅ Payment recorded:', {
+        id: payment.id,
+        amount,
+        blockchain,
+        paytag: paytag.handle
+      });
+    } catch (error: any) {
+      console.error('❌ Failed to create payment record:', error.message);
+      throw new Error('Failed to record payment in database');
+    }
 
     // Generate receipt
-    await this.generateReceipt(payment, paytag.handle);
+    try {
+      await this.generateReceipt(payment, paytag.handle);
+    } catch (error: any) {
+      // Log but don't fail the webhook if receipt generation fails
+      console.error('❌ Failed to generate receipt:', error.message);
+    }
   }
 
   /**
@@ -174,7 +218,7 @@ export class WebhookService {
       return ['ETH', 'BASE', 'ETH-MAINNET', 'BASE-MAINNET'];
     }
     
-    return ['ETH-SEPOLIA', 'BASE-SEPOLIA'];
+    return ['ETH', 'BASE','ETH-SEPOLIA', 'BASE-SEPOLIA'];
   }
 
   /**
