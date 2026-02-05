@@ -70,6 +70,15 @@ const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       const rawBody = (request as any).rawBody;
 
       fastify.log.info({ keyId }, '📨 Webhook received from Circle');
+      
+      // Log the payload structure for debugging
+      fastify.log.info({ 
+        notificationType: payload?.notificationType,
+        notificationHasData: !!payload?.notification,
+        tokenId: payload?.notification?.tokenId,
+        blockchain: payload?.notification?.blockchain,
+        state: payload?.notification?.state
+      }, 'Webhook payload structure');
 
       if (!signature) {
         fastify.log.warn('Webhook rejected: Missing signature header');

@@ -2,7 +2,7 @@ import { FastifyPluginAsync } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { PaytagService } from '../services/paytag.service.js';
 import { CircleService } from '../services/circle.service.js';
-import { db, payments, paytags } from '../db/index.js';
+import { db, payments, paytags, receipts } from '../db/index.js';
 import { eq, desc } from 'drizzle-orm';
 
 const paytagService = new PaytagService();
@@ -86,8 +86,10 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
                 id: Type.String(),
                 amount: Type.String(),
                 asset: Type.String(),
+                chain: Type.String(),
                 txHash: Type.String(),
                 status: Type.String(),
+                receiptPublicId: Type.Union([Type.String(), Type.Null()]),
                 createdAt: Type.String(),
               })
             ),
@@ -117,11 +119,14 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
           id: payments.id,
           amount: payments.amount,
           asset: payments.asset,
+          chain: payments.chain,
           txHash: payments.txHash,
           status: payments.status,
           createdAt: payments.createdAt,
+          receiptPublicId: receipts.receiptPublicId,
         })
         .from(payments)
+        .leftJoin(receipts, eq(payments.id, receipts.paymentId))
         .where(eq(payments.paytagId, paytag.id))
         .orderBy(desc(payments.createdAt))
         .limit(limit);
@@ -228,7 +233,7 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
       schema: {
         tags: ['paytags'],
         summary: 'Check handle availability',
-        description: 'Check if a PayTag handle is available',
+        description: 'Check if a PayTag handle is available (checks both database and ENS)',
         params: Type.Object({
           handle: Type.String(),
         }),
@@ -236,6 +241,12 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
           200: Type.Object({
             available: Type.Boolean(),
             handle: Type.String(),
+            reasons: Type.Optional(
+              Type.Object({
+                inDatabase: Type.Boolean(),
+                ensSubdomainExists: Type.Boolean(),
+              })
+            ),
           }),
         },
       },
@@ -243,11 +254,22 @@ const paytagRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { handle } = request.params as { handle: string };
 
+      // Check database
       const paytag = await paytagService.getPaytagByHandle(handle);
+      const inDatabase = !!paytag;
+
+      // Check ENS subdomain
+      const ensSubdomainExists = await paytagService.checkEnsSubdomainExists(handle);
+
+      const available = !inDatabase && !ensSubdomainExists;
 
       return {
-        available: !paytag,
+        available,
         handle,
+        reasons: {
+          inDatabase,
+          ensSubdomainExists,
+        },
       };
     }
   );

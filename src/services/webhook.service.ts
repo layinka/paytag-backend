@@ -2,6 +2,7 @@ import { db, payments, receipts, Payment, Receipt } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { CircleService } from './circle.service.js';
 import { PaytagService } from './paytag.service.js';
+import { WalrusService } from './walrus.service.js';
 import { nanoid } from 'nanoid';
 
 /**
@@ -11,10 +12,12 @@ import { nanoid } from 'nanoid';
 export class WebhookService {
   private circleService: CircleService;
   private paytagService: PaytagService;
+  private walrusService: WalrusService;
 
   constructor() {
     this.circleService = new CircleService();
     this.paytagService = new PaytagService();
+    this.walrusService = new WalrusService();
   }
 
   /**
@@ -57,12 +60,14 @@ export class WebhookService {
       type: event.type,
       state: event.state,
       blockchain: event.blockchain,
-      transactionId: event.transactionId
+      transactionId: event.transactionId,
+      tokenId: event.tokenId,
+      amount: event.amount
     });
 
     // Handle inbound transactions (deposits)
     // Circle uses CONFIRMED state for successful transactions
-    if (event.type === 'transactions.inbound' && event.state === 'CONFIRMED') {
+    if (event.type === 'transactions.inbound' && (event.state === 'CONFIRMED' || event.state === 'COMPLETE')) {
       await this.handleInboundTransaction(event, parsedPayload);
     } else if (event.type === 'transactions.inbound') {
       console.log(`ℹ️  Inbound transaction in ${event.state} state - not processing yet`);
@@ -78,7 +83,8 @@ export class WebhookService {
       transactionId, 
       amount, 
       tokenId, 
-      blockchain
+      blockchain,
+      txHash
     } = event;
 
     // Validate required fields
@@ -125,6 +131,11 @@ export class WebhookService {
       return;
     }
 
+    // Log token ID before normalization
+    console.log('🔍 Token ID from webhook:', tokenId);
+    const normalizedAsset = this.normalizeTokenId(tokenId);
+    console.log('🔍 Normalized asset:', normalizedAsset);
+
     // Create payment record
     let payment;
     try {
@@ -133,20 +144,21 @@ export class WebhookService {
         .values({
           paytagId: paytag.id,
           chain: blockchain || 'ETH-SEPOLIA',
-          asset: this.normalizeTokenId(tokenId),
+          asset: normalizedAsset,
           amount: amount || '0',
           fromAddress: null, // Circle doesn't provide source address in this format
           toAddress: destinationAddress,
-          txHash: transactionId, // Use transaction ID as hash
+          txHash: txHash, // Use transaction ID as hash
           circleTransferId: transactionId,
           rawEvent: rawPayload,
-          status: 'processed',
+          status: 'completed',
         })
         .returning();
 
       console.log('✅ Payment recorded:', {
         id: payment.id,
         amount,
+        asset: normalizedAsset,
         blockchain,
         paytag: paytag.handle
       });
@@ -156,56 +168,164 @@ export class WebhookService {
     }
 
     // Generate receipt
+    console.log('🧾 Calling generateReceipt for payment:', payment.id);
     try {
-      await this.generateReceipt(payment, paytag.handle);
+      const receipt = await this.generateReceipt(payment, paytag, event);
+      console.log('✅ Receipt generation completed successfully:', receipt.receiptPublicId);
     } catch (error: any) {
       // Log but don't fail the webhook if receipt generation fails
-      console.error('❌ Failed to generate receipt:', error.message);
+      console.error('❌ Failed to generate receipt:', error?.message);
+      console.error('   Full error:', error);
+      console.error('   Stack:', error?.stack);
     }
   }
 
   /**
    * Generate public receipt for payment
    */
-  private async generateReceipt(payment: Payment, paytagHandle: string): Promise<Receipt> {
+  private async generateReceipt(
+    payment: Payment,
+    paytag: any,
+    event: any
+  ): Promise<Receipt> {
+    console.log('🧾 Starting receipt generation for payment:', payment.id);
+    
     const receiptPublicId = nanoid(12);
 
+    // Get explorer URL based on chain
+    const explorerUrl = this.getExplorerUrl(payment.txHash, payment.chain);
+
+    console.log('   Receipt ID:', receiptPublicId);
+    console.log('   PayTag:', paytag.handle);
+    console.log('   Explorer URL:', explorerUrl);
+
+    // Build receipt JSON for Walrus
+    const receiptData = {
+      receiptId: receiptPublicId,
+      paytagHandle: paytag.handle,
+      paytagName: `${paytag.handle}.paytag.eth`,
+      receiverAddress: paytag.circleWalletAddress,
+      chain: payment.chain,
+      assetIn: payment.asset,
+      amountIn: payment.amount,
+      amountUSDC: payment.amount, // TODO: Add conversion if needed
+      txHash: payment.txHash,
+      paymentId: payment.id,
+      blockTimestamp: event.timestamp || new Date().toISOString(),
+      status: 'confirmed' as const,
+      proof: {
+        explorerUrl,
+        circleTransferId: payment.circleTransferId,
+      },
+      createdAt: new Date().toISOString(),
+    };
+
+    // Store on Walrus
+    let walrusBlobId: string | null = null;
+    let receiptHash: string | null = null;
+
+    console.log('   Attempting Walrus storage...');
+    try {
+      const walrusResult = await this.walrusService.storeBlob(receiptData, {
+        epochs: 5, // Store for 5 epochs (reduced from 100 for testnet compatibility)
+        permanent: false,
+      });
+
+      walrusBlobId = walrusResult.blobId;
+      receiptHash = walrusResult.hash;
+
+      console.log('📦 Receipt stored on Walrus:', {
+        blobId: walrusBlobId.substring(0, 16) + '...',
+        hash: receiptHash.substring(0, 16) + '...',
+      });
+    } catch (error: any) {
+      console.error('⚠️  Walrus storage failed, continuing without it:', error.message);
+      if (error.response?.data) {
+        console.error('   Walrus error details:', JSON.stringify(error.response.data, null, 2));
+      }
+    }
+
+    // Store in database
+    console.log('   Storing receipt in database...');
     const [receipt] = await db
       .insert(receipts)
       .values({
         paymentId: payment.id,
         receiptPublicId,
-        paytagHandle,
+        paytagHandle: paytag.handle,
+        paytagName: `${paytag.handle}.paytag.base.eth`,
+        receiverAddress: paytag.circleWalletAddress,
+        chain: payment.chain,
+        assetIn: payment.asset,
+        amountIn: payment.amount,
         amountUSDC: payment.amount,
         txHash: payment.txHash,
+        blockTimestamp: event.timestamp || null,
+        status: 'confirmed',
+        circleTransferId: payment.circleTransferId,
+        explorerUrl,
+        walrusBlobId,
+        receiptHash,
       })
       .returning();
 
-    console.log('🧾 Receipt generated:', receiptPublicId);
+    console.log('✅ Receipt generated successfully:', receiptPublicId);
 
     return receipt;
   }
 
   /**
+   * Get block explorer URL for transaction
+   */
+  private getExplorerUrl(txHash: string, chain: string): string {
+    const explorers: Record<string, string> = {
+      'BASE': 'https://basescan.org',
+      'BASE-SEPOLIA': 'https://sepolia.basescan.org',
+      'ETH': 'https://etherscan.io',
+      'ETH-SEPOLIA': 'https://sepolia.etherscan.io',
+      'ETHEREUM': 'https://etherscan.io',
+      'ETHEREUM_SEPOLIA': 'https://sepolia.etherscan.io',
+    };
+
+    const baseUrl = explorers[chain] || explorers['BASE'];
+    return `${baseUrl}/tx/${txHash}`;
+  }
+
+  /**
    * Normalize asset name
    */
-  private normalizeAsset(asset: string): 'USDC' | 'ETH' | 'UNKNOWN' {
+  private normalizeAsset(asset: string): 'USDC' | 'EURC' | 'ETH' | 'UNKNOWN' {
     const normalized = asset.toUpperCase();
     if (normalized.includes('USDC')) return 'USDC';
+    if (normalized.includes('EURC')) return 'EURC';
     if (normalized.includes('ETH')) return 'ETH';
     return 'UNKNOWN';
   }
 
   /**
    * Normalize Circle token ID to asset name
-   * In production, you'd map token IDs to actual token symbols via Circle API
+   * Maps Circle's token UUIDs to their corresponding asset symbols
    */
-  private normalizeTokenId(tokenId?: string): 'USDC' | 'ETH' | 'UNKNOWN' {
-    if (!tokenId) return 'USDC'; // Default to USDC
+  private normalizeTokenId(tokenId?: string): 'USDC' | 'EURC' | 'ETH' | 'UNKNOWN' {
+    if (!tokenId) {
+      console.warn('⚠️  No tokenId provided, returning UNKNOWN');
+      return 'UNKNOWN';
+    }
     
-    // Circle's token IDs are UUIDs, you'd need to maintain a mapping
-    // For now, assume USDC as it's the primary token for Circle
-    return 'USDC';
+    // Circle token ID mappings
+    const TOKEN_ID_MAP: Record<string, 'USDC' | 'EURC' | 'ETH'> = {
+      'c22b378a-843a-59b6-aaf5-bcba622729e6': 'USDC',
+      '5797fbd6-3795-519d-84ca-ec4c5f80c3b1': 'EURC',
+      '979869da-9115-5f7d-917d-12d434e56ae7': 'ETH',
+    };
+    
+    const result = TOKEN_ID_MAP[tokenId];
+    if (!result) {
+      console.warn('⚠️  Unknown tokenId:', tokenId, '- returning UNKNOWN');
+      return 'UNKNOWN';
+    }
+    
+    return result;
   }
 
   /**

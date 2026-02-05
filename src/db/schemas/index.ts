@@ -61,7 +61,7 @@ export const payments = sqliteTable('payments', {
     .notNull()
     .references(() => paytags.id, { onDelete: 'cascade' }),
   chain: text('chain').notNull(),
-  asset: text('asset', { enum: ['USDC', 'ETH', 'UNKNOWN'] })
+  asset: text('asset', { enum: ['USDC', 'EURC', 'ETH', 'UNKNOWN'] })
     .notNull()
     .default('UNKNOWN'),
   amount: text('amount').notNull(),
@@ -70,7 +70,7 @@ export const payments = sqliteTable('payments', {
   txHash: text('tx_hash').notNull().unique(),
   circleTransferId: text('circle_transfer_id'),
   rawEvent: text('raw_event', { mode: 'json' }).notNull(),
-  status: text('status', { enum: ['detected', 'processed', 'failed'] })
+  status: text('status', { enum: ['completed', 'confirmed', 'detected', 'processed', 'failed'] })
     .notNull()
     .default('detected'),
   createdAt: integer('created_at', { mode: 'timestamp' })
@@ -89,8 +89,21 @@ export const receipts = sqliteTable('receipts', {
     .references(() => payments.id, { onDelete: 'cascade' }),
   receiptPublicId: text('receipt_public_id').notNull().unique(),
   paytagHandle: text('paytag_handle').notNull(),
+  paytagName: text('paytag_name').notNull(),
+  receiverAddress: text('receiver_address').notNull(),
+  chain: text('chain').notNull(),
+  assetIn: text('asset_in').notNull(),
+  amountIn: text('amount_in').notNull(),
   amountUSDC: text('amount_usdc').notNull(),
   txHash: text('tx_hash').notNull(),
+  blockTimestamp: text('block_timestamp'),
+  status: text('status', { enum: ['confirmed', 'pending', 'failed'] })
+    .notNull()
+    .default('confirmed'),
+  circleTransferId: text('circle_transfer_id'),
+  explorerUrl: text('explorer_url'),
+  walrusBlobId: text('walrus_blob_id'),
+  receiptHash: text('receipt_hash'),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

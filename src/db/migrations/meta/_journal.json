@@ -8,6 +8,13 @@
       "when": 1770033942825,
       "tag": "0000_special_lightspeed",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1770230828243,
+      "tag": "0001_motionless_leader",
+      "breakpoints": true
     }
   ]
 }

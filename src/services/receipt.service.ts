@@ -5,14 +5,23 @@ export interface ReceiptDetails {
   id: string;
   receiptPublicId: string;
   paytagHandle: string;
+  paytagName: string;
   displayName: string | null;
+  receiverAddress: string;
+  chain: string;
+  assetIn: string;
+  amountIn: string;
   amountUSDC: string;
-  asset: string;
   txHash: string;
   fromAddress: string | null;
-  chain: string;
-  createdAt: Date;
+  blockTimestamp: string | null;
   status: string;
+  explorerUrl: string | null;
+  circleTransferId: string | null;
+  walrusBlobId: string | null;
+  walrusUrl: string | null;
+  receiptHash: string | null;
+  createdAt: Date;
 }
 
 /**
@@ -29,13 +38,21 @@ export class ReceiptService {
         id: receipts.id,
         receiptPublicId: receipts.receiptPublicId,
         paytagHandle: receipts.paytagHandle,
+        paytagName: receipts.paytagName,
+        receiverAddress: receipts.receiverAddress,
+        chain: receipts.chain,
+        assetIn: receipts.assetIn,
+        amountIn: receipts.amountIn,
         amountUSDC: receipts.amountUSDC,
         txHash: receipts.txHash,
+        blockTimestamp: receipts.blockTimestamp,
+        status: receipts.status,
+        explorerUrl: receipts.explorerUrl,
+        circleTransferId: receipts.circleTransferId,
+        walrusBlobId: receipts.walrusBlobId,
+        receiptHash: receipts.receiptHash,
         createdAt: receipts.createdAt,
-        asset: payments.asset,
         fromAddress: payments.fromAddress,
-        chain: payments.chain,
-        status: payments.status,
         displayName: paytags.displayName,
       })
       .from(receipts)
@@ -44,6 +61,21 @@ export class ReceiptService {
       .where(eq(receipts.receiptPublicId, receiptPublicId))
       .limit(1);
 
-    return receipt || null;
+    if (!receipt) {
+      return null;
+    }
+
+    // Generate Walrus aggregator URL if blob ID exists
+    // const walrusUrl = receipt.walrusBlobId
+    //   ? `https://aggregator.walrus-testnet.walrus.space/v1/${receipt.walrusBlobId}`
+    //   : null;
+    const walrusUrl = receipt.walrusBlobId
+      ? `https://walruscan.com/testnet/blob/${receipt.walrusBlobId}`
+      : null;
+
+    return {
+      ...receipt,
+      walrusUrl,
+    };
   }
 }

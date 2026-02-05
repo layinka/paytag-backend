@@ -78,7 +78,7 @@ export class CircleService {
     
     const response = await this.client?.createWallets({
       walletSetId: this.walletSetId,
-      blockchains: ['ETH','ETH-SEPOLIA', 'BASE', 'BASE-SEPOLIA'],
+      blockchains: ['ETH-SEPOLIA',  'BASE-SEPOLIA'],// 'ETH','BASE',
       count,
     //   metadata: [
     //     { name:'', refId:   userId}
@@ -293,6 +293,7 @@ export class CircleService {
     transactionType?: string;
     createDate?: string;
     updateDate?: string;
+    txHash?: string;
   } {
     const notificationType = payload.notificationType || 'unknown';
     const notification = payload.notification || {};
@@ -309,6 +310,7 @@ export class CircleService {
       transactionType: notification.transactionType,
       createDate: notification.createDate,
       updateDate: notification.updateDate,
+      txHash: notification.txHash,
     };
   }
 

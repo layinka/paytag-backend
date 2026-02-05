@@ -1,6 +1,7 @@
 import { db, paytags, users, Paytag, NewPaytag } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { CircleService } from './circle.service.js';
+import { createENSServiceFromEnv } from './ens.service.js';
 import { normalizeHandle, isValidHandle } from '../lib/utils.js';
 
 /**
@@ -9,9 +10,18 @@ import { normalizeHandle, isValidHandle } from '../lib/utils.js';
  */
 export class PaytagService {
   private circleService: CircleService;
+  private ensService: ReturnType<typeof createENSServiceFromEnv> | null;
 
   constructor() {
     this.circleService = new CircleService();
+    
+    // Initialize ENS service if configured
+    try {
+      this.ensService = createENSServiceFromEnv();
+    } catch (error) {
+      console.warn('ENS service not configured:', error);
+      this.ensService = null;
+    }
   }
 
   /**
@@ -82,7 +92,45 @@ export class PaytagService {
       })
       .returning();
 
+    // Create ENS subdomain if ENS is configured
+    if (this.ensService) {
+      try {
+        const ensResult = await this.ensService.createSubname({
+          label: normalizedHandle,
+          targetAddress: wallet.wallets[0].address as `0x${string}`,
+        });
+        
+        console.log(`ENS subdomain created: ${ensResult.subname} -> ${ensResult.targetAddress}`);
+        console.log('Transactions:', ensResult.transactions);
+      } catch (error) {
+        console.error('Failed to create ENS subdomain:', error);
+        // Don't fail the whole operation if ENS creation fails
+        // The PayTag is still usable without ENS
+      }
+    }
+
     return paytag;
+  }
+
+  /**
+   * Check if ENS subdomain exists for a handle
+   */
+  async checkEnsSubdomainExists(handle: string): Promise<boolean> {
+    if (!this.ensService) {
+      return false; // ENS not configured
+    }
+
+    try {
+      const normalizedHandle = normalizeHandle(handle);
+      const chainInfo = this.ensService.getChainInfo();
+      const subdomain = `${normalizedHandle}.${chainInfo.parentName}`;
+      
+      const resolvedAddress = await this.ensService.resolveAddress(subdomain);
+      return resolvedAddress !== null;
+    } catch (error) {
+      console.error('Error checking ENS subdomain:', error);
+      return false;
+    }
   }
 
   /**
