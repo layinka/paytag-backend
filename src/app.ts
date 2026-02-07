@@ -13,6 +13,7 @@ import userAuthRoutes from './routes/auth.user.js';
 import paytagRoutes from './routes/paytags.js';
 import receiptRoutes from './routes/receipts.js';
 import webhookRoutes from './routes/webhooks.js';
+import settingsRoutes from './routes/settings.js';
 
 // Admin Routes
 import adminAuthRoutes from './routes/admin/admin.auth.js';
@@ -60,6 +61,7 @@ export async function buildApp() {
   await fastify.register(paytagRoutes);
   await fastify.register(receiptRoutes);
   await fastify.register(webhookRoutes);
+  await fastify.register(settingsRoutes);
 
   // Admin Routes
   await fastify.register(adminAuthRoutes);

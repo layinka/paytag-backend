@@ -41,8 +41,13 @@ const userAuthRoutes: FastifyPluginAsync = async (fastify) => {
       // Generate OTP
       const code = await otpService.createOtp(email.toLowerCase());
 
-      // Send OTP via email (mock)
-      await emailService.sendOtpEmail(email, code);
+      // Send OTP via email
+      try{
+        await emailService.sendOtpEmail(email, code);
+      }catch(error){
+        console.error('❌ Failed to send OTP email:', error);
+      }
+      
 
       return {
         message: 'OTP sent to email',
@@ -119,8 +124,13 @@ const userAuthRoutes: FastifyPluginAsync = async (fastify) => {
 
         isNewUser = true;
 
-        // Send welcome email
-        await emailService.sendWelcomeEmail(normalizedEmail);
+        
+        try{
+          // Send welcome email
+          await emailService.sendWelcomeEmail(normalizedEmail);
+        }catch(error){
+          console.error('❌ Failed to send welcome email:', error);
+        }
       } else if (!user.emailVerifiedAt) {
         // Mark email as verified
         [user] = await db

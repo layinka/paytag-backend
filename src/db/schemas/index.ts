@@ -9,6 +9,10 @@ export const users = sqliteTable('users', {
   id: text('id').primaryKey().$defaultFn(() => createId()),
   email: text('email').notNull().unique(),
   emailVerifiedAt: integer('email_verified_at', { mode: 'timestamp' }),
+  autoswapEnabled: integer('autoswap_enabled', { mode: 'boolean' }).notNull().default(0),
+  autoswapSlippageBps: integer('autoswap_slippage_bps').notNull().default(50),
+  autoswapMaxGasGwei: integer('autoswap_max_gas_gwei'),
+  autoswapMinAmountWei: text('autoswap_min_amount_wei'),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -73,6 +77,13 @@ export const payments = sqliteTable('payments', {
   status: text('status', { enum: ['completed', 'confirmed', 'detected', 'processed', 'failed'] })
     .notNull()
     .default('detected'),
+  swapStatus: text('swap_status', { enum: ['not_applicable', 'queued', 'swapping', 'swapped', 'swap_failed'] })
+    .notNull()
+    .default('not_applicable'),
+  swapTxHash: text('swap_tx_hash'),
+  swapError: text('swap_error'),
+  amountOutUSDC: text('amount_out_usdc'),
+  routerUsed: text('router_used'),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -104,7 +115,36 @@ export const receipts = sqliteTable('receipts', {
   explorerUrl: text('explorer_url'),
   walrusBlobId: text('walrus_blob_id'),
   receiptHash: text('receipt_hash'),
+  swapDetailsJson: text('swap_details_json'),
   createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+/**
+ * Swap Jobs table
+ * Queue for async autoswap processing
+ */
+export const swapJobs = sqliteTable('swap_jobs', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  paymentId: text('payment_id')
+    .notNull()
+    .unique()
+    .references(() => payments.id, { onDelete: 'cascade' }),
+  status: text('status', { enum: ['queued', 'locked', 'completed', 'failed'] })
+    .notNull()
+    .default('queued'),
+  attempts: integer('attempts').notNull().default(0),
+  maxAttempts: integer('max_attempts').notNull().default(3),
+  nextRunAt: integer('next_run_at', { mode: 'timestamp' }).notNull(),
+  lockedAt: integer('locked_at', { mode: 'timestamp' }),
+  lockedBy: text('locked_by'),
+  completedAt: integer('completed_at', { mode: 'timestamp' }),
+  error: text('error'),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),
 });
@@ -124,3 +164,6 @@ export type NewPayment = typeof payments.$inferInsert;
 
 export type Receipt = typeof receipts.$inferSelect;
 export type NewReceipt = typeof receipts.$inferInsert;
+
+export type SwapJob = typeof swapJobs.$inferSelect;
+export type NewSwapJob = typeof swapJobs.$inferInsert;

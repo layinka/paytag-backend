@@ -1,6 +1,6 @@
 # PayTag Backend
 
-> **Production-quality hackathon backend** for Web3 payments. Create PayTags, receive crypto, generate receipts with ENS integration.
+> **Production-quality backend** for Web3 payments. Create PayTags, receive crypto, generate receipts with ENS integration.
 
 ## 🎯 Overview
 
@@ -12,6 +12,115 @@ PayTag is a backend service that allows users to:
 - **Detect payments** through Circle webhooks
 - **Generate public receipts** stored on Walrus (decentralized storage)
 - **Multi-asset support** (USDC, EURC, ETH)
+- **AutoSwap to USDC** - Automatically convert ETH to USDC via Uniswap V4
+
+## 💱 AutoSwap Feature
+
+PayTag includes an **AutoSwap** feature that automatically converts incoming ETH payments to USDC using Uniswap V4 on Ethereum Sepolia.
+
+### How It Works
+
+1. **User enables AutoSwap** in settings (frontend `/app/settings`)
+2. **ETH payment received** → Circle webhook detects it
+3. **Swap job enqueued** → Async worker picks it up
+4. **Swap executed** → Via Uniswap V4 Universal Router using Circle wallet
+5. **Receipt updated** → Both deposit and swap transactions recorded
+
+### Configuration
+
+Users can configure:
+- **Enable/Disable** AutoSwap toggle
+- **Slippage Tolerance** (0.05% - 3%, default 0.5%)
+- **Minimum Amount** (optional, only swap if payment exceeds threshold)
+
+### Safety Controls
+
+- Maximum 0.25 ETH per swap (testnet limit)
+- Slippage clamped between 5-300 basis points
+- 10-minute transaction deadline
+- 3 retry attempts with exponential backoff
+- Idempotent processing (webhooks can repeat safely)
+
+### Running the Worker
+
+The AutoSwap worker must be running to process swaps:
+
+```bash
+# Development
+npm run worker:swap
+
+# Production
+npm run worker:swap:prod
+```
+
+The worker:
+- Polls for queued swap jobs every 15 seconds
+- Processes up to 10 jobs per batch
+- Locks jobs to prevent duplicate processing
+- Updates receipts with swap details
+- Uploads updated receipts to Walrus
+
+### Environment Variables
+
+Add these to your `.env`:
+
+```bash
+# AutoSwap Configuration
+AUTOSWAP_ENABLED=true
+SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+
+# Existing Circle/ENS vars...
+```
+
+### Database Schema
+
+AutoSwap adds these fields:
+
+**users table**:
+- `autoswap_enabled` - Boolean flag
+- `autoswap_slippage_bps` - Slippage in basis points (default 50 = 0.5%)
+- `autoswap_max_gas_gwei` - Optional gas limit
+- `autoswap_min_amount_wei` - Optional minimum amount threshold
+
+**payments table**:
+- `swap_status` - enum: not_applicable, queued, swapping, swapped, swap_failed
+- `swap_tx_hash` - Swap transaction hash
+- `swap_error` - Error message if swap failed
+- `amount_out_usdc` - USDC received from swap
+- `router_used` - Router contract used (uniswap-v4-universal-router)
+
+**receipts table**:
+- `swap_details_json` - JSON with swap details
+
+**swap_jobs table** (new):
+- Manages async swap job queue
+- Tracks attempts, status, locks
+- Enables retries with exponential backoff
+
+### API Endpoints
+
+#### `GET /v1/me/settings`
+Get user AutoSwap settings (requires JWT)
+
+#### `PATCH /v1/me/settings`
+Update AutoSwap settings (requires JWT)
+
+```json
+{
+  "autoswapEnabled": true,
+  "autoswapSlippageBps": 50,
+  "autoswapMinAmountWei": "10000000000000000"
+}
+```
+
+### Technical Details
+
+- **Swap Router**: Uniswap V4 Universal Router (`0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b`)
+- **Chain**: Ethereum Sepolia (testnet)
+- **USDC**: `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`
+- **Execution**: Circle developer-controlled wallet signs and submits transactions
+- **Quote Source**: Simplified price estimation (production should use Quoter contract)
+- **Confirmation**: Polls Circle API for transaction status
 
 ## 🔐 Authentication
 

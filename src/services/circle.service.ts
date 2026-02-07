@@ -374,4 +374,101 @@ export class CircleService {
       throw new Error(`Entity Secret registration failed: ${error.message}`);
     }
   }
+
+  /**
+   * Execute a contract call from a Circle wallet
+   * Used for swaps and other onchain interactions
+   * 
+   * @param walletId - Circle wallet ID
+   * @param contractAddress - Target contract address
+   * @param callData - Encoded function call data
+   * @param value - ETH value to send (in wei, as string)
+   * @param feeLevel - Gas fee level (LOW, MEDIUM, HIGH)
+   * @returns Transaction response with transaction ID
+   */
+  async executeContractCall(
+    walletId: string,
+    contractAddress: string,
+    callData: string,
+    value: string = '0',
+    feeLevel: 'LOW' | 'MEDIUM' | 'HIGH' = 'MEDIUM'
+  ): Promise<{
+    transactionId: string;
+    state: string;
+    txHash?: string;
+  }> {
+    if (!this.client) {
+      throw new Error('Circle API client not initialized');
+    }
+
+    try {
+      console.log('🔵 Executing contract call from Circle wallet:', {
+        walletId: walletId.substring(0, 16) + '...',
+        contract: contractAddress,
+        value,
+        feeLevel,
+      });
+
+      const response = await this.client.createTransaction({
+        walletId,
+        contractAddress,
+        abiFunctionSignature: 'execute(bytes,bytes[])',
+        abiParameters: [callData],
+        fee: {
+          type: 'level',
+          config: {
+            feeLevel,
+          },
+        },
+        amount: value !== '0' ? [value] : undefined,
+      });
+
+      console.log('✅ Transaction submitted:', {
+        transactionId: response.data?.id,
+        state: response.data?.state,
+      });
+
+      return {
+        transactionId: response.data?.id || '',
+        state: response.data?.state || 'INITIATED',
+        txHash: response.data?.txHash,
+      };
+    } catch (error: any) {
+      console.error('❌ Contract call failed:', error.message);
+      throw new Error(`Contract execution failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get transaction status by ID
+   * Used to poll for transaction confirmation
+   */
+  async getTransaction(transactionId: string): Promise<{
+    id: string;
+    state: string;
+    txHash?: string;
+    blockchain?: string;
+    createDate?: string;
+    updateDate?: string;
+  } | null> {
+    if (!this.client) {
+      throw new Error('Circle API client not initialized');
+    }
+
+    try {
+      const response = await this.client.getTransaction({ id: transactionId });
+      
+      return {
+        id: response.data?.transaction?.id || transactionId,
+        state: response.data?.transaction?.state || 'UNKNOWN',
+        txHash: response.data?.transaction?.txHash,
+        blockchain: response.data?.transaction?.blockchain,
+        createDate: response.data?.transaction?.createDate,
+        updateDate: response.data?.transaction?.updateDate,
+      };
+    } catch (error: any) {
+      console.error('❌ Failed to get transaction:', error.message);
+      return null;
+    }
+  }
 }

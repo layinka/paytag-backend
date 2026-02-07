@@ -15,6 +15,13 @@
       "when": 1770230828243,
       "tag": "0001_motionless_leader",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1770450395316,
+      "tag": "0002_wooden_otto_octavius",
+      "breakpoints": true
     }
   ]
 }

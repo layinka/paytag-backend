@@ -1,9 +1,11 @@
-import { db, payments, receipts, Payment, Receipt } from '../db/index.js';
+import { db, payments, receipts, swapJobs, paytags, users, Payment, Receipt } from '../db/index.js';
 import { eq } from 'drizzle-orm';
+import { parseEther, formatUnits } from 'viem';
 import { CircleService } from './circle.service.js';
 import { PaytagService } from './paytag.service.js';
 import { WalrusService } from './walrus.service.js';
 import { nanoid } from 'nanoid';
+import { isAutoswapSupported } from '../lib/swap-config.js';
 
 /**
  * Webhook Service
@@ -178,6 +180,9 @@ export class WebhookService {
       console.error('   Full error:', error);
       console.error('   Stack:', error?.stack);
     }
+
+    // Check if AutoSwap should be triggered
+    await this.checkAndEnqueueAutoswap(payment, paytag);
   }
 
   /**
@@ -314,9 +319,12 @@ export class WebhookService {
     
     // Circle token ID mappings
     const TOKEN_ID_MAP: Record<string, 'USDC' | 'EURC' | 'ETH'> = {
-      'c22b378a-843a-59b6-aaf5-bcba622729e6': 'USDC',
-      '5797fbd6-3795-519d-84ca-ec4c5f80c3b1': 'EURC',
+      'bdf128b4-827b-5267-8f9e-243694989b5f': 'USDC', //base sepolia 
+      '5797fbd6-3795-519d-84ca-ec4c5f80c3b1': 'USDC', //eth sepolia
+      // '5797fbd6-3795-519d-84ca-ec4c5f80c3b1': 'EURC',
       '979869da-9115-5f7d-917d-12d434e56ae7': 'ETH',
+      // '5797fbd6-3795-519d-84ca-ec4c5f80c3b1': 'USDC', //usdc on arc
+      'c22b378a-843a-59b6-aaf5-bcba622729e6': 'EURC', //EURC on eth sepolia
     };
     
     const result = TOKEN_ID_MAP[tokenId];
@@ -349,5 +357,98 @@ export class WebhookService {
     
     const supported = this.getSupportedBlockchains();
     return supported.includes(blockchain);
+  }
+
+  /**
+   * Check if AutoSwap should be triggered and enqueue job
+   */
+  private async checkAndEnqueueAutoswap(payment: Payment, paytag: any): Promise<void> {
+    try {
+      // Only autoswap for ETH payments
+      if (!isAutoswapSupported(payment.asset, payment.chain)) {
+        console.log('ℹ️  AutoSwap not supported for asset/chain:', {
+          asset: payment.asset,
+          chain: payment.chain,
+        });
+        return;
+      }
+
+      // Get user settings
+      const [user] = await db
+        .select()
+        .from(users)
+        .innerJoin(paytags, eq(paytags.userId, users.id))
+        .where(eq(paytags.id, paytag.id))
+        .limit(1);
+
+      if (!user) {
+        console.warn('⚠️  User not found for paytag:', paytag.id);
+        return;
+      }
+
+      const userSettings = user.users;
+
+      // Check if autoswap is enabled
+      if (!userSettings.autoswapEnabled) {
+        console.log('ℹ️  AutoSwap disabled for user');
+        return;
+      }
+
+      // Check minimum amount if configured
+      if (userSettings.autoswapMinAmountWei) {
+        const minAmount = BigInt(userSettings.autoswapMinAmountWei);
+        // Convert payment.amount from ETH to wei (Circle sends as "0.1" not "100000000000000000")
+        const paymentAmountWei = parseEther(payment.amount);
+        
+        if (paymentAmountWei < minAmount) {
+          console.log('ℹ️  Payment below minimum autoswap amount:', {
+            payment: payment.amount,
+            paymentWei: paymentAmountWei.toString(),
+            minimum: userSettings.autoswapMinAmountWei,
+          });
+          return;
+        }
+      }
+
+      // Check if job already exists (idempotency)
+      const [existingJob] = await db
+        .select()
+        .from(swapJobs)
+        .where(eq(swapJobs.paymentId, payment.id))
+        .limit(1);
+
+      if (existingJob) {
+        console.log('ℹ️  Swap job already exists:', existingJob.id);
+        return;
+      }
+
+      // Enqueue swap job
+      const [job] = await db
+        .insert(swapJobs)
+        .values({
+          paymentId: payment.id,
+          status: 'queued',
+          attempts: 0,
+          maxAttempts: 3,
+          nextRunAt: new Date(), // Process immediately
+        })
+        .returning();
+
+      // Update payment status
+      await db
+        .update(payments)
+        .set({ swapStatus: 'queued' })
+        .where(eq(payments.id, payment.id));
+
+      console.log('✅ AutoSwap job enqueued:', {
+        jobId: job.id,
+        paymentId: payment.id,
+        amount: payment.amount,
+        asset: payment.asset,
+      });
+    } catch (error: any) {
+      console.error('❌ Failed to enqueue autoswap:', error.message);
+      // Don't fail webhook processing if autoswap enqueue fails
+    }
   }
 }
